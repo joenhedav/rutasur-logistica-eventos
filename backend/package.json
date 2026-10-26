@@ -1,0 +1,8 @@
+{
+  "name": "rutasur-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RutaSur - servicios Node.js (simulador, proyector, notificaciones, reprogramación, monitor de SLA, analítica)",
+  "scripts": { "test": "node --test test/*.test.js", "lag": "node scripts/lag.js" },
+  "dependencies": { "kafkajs": "^2.2.4", "mongodb": "^6.8.0" }
+}

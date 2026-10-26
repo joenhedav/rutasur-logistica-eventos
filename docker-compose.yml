@@ -1,0 +1,116 @@
+# RutaSur - todo el entorno con un solo comando:   docker compose up --build
+# Variables útiles:  AUTOSTART=false (sin flujo continuo)  SIM_ACCEL=120  SIM_RATE=20  SIM_SEED=42
+
+x-backend: &backend
+  build: ./backend
+  restart: unless-stopped
+  depends_on:
+    kafka-init: { condition: service_completed_successfully }
+    mongo: { condition: service_healthy }
+  environment: &env
+    KAFKA_BROKERS: kafka:9092
+    MONGO_URL: mongodb://mongo:27017/rutasur?replicaSet=rs0
+    SIM_ACCEL: ${SIM_ACCEL:-120}
+    SIM_SEED: ${SIM_SEED:-42}
+    SIM_RATE: ${SIM_RATE:-20}
+    SIM_START: ${SIM_START:-2026-03-02T06:00:00Z}
+    AUTOSTART: ${AUTOSTART:-true}
+    P_DEMORA_HUB: ${P_DEMORA_HUB:-0.1}
+    P_DUPLICADO: ${P_DUPLICADO:-0.02}
+    P_FUERA_ORDEN: ${P_FUERA_ORDEN:-0.02}
+    P_MALFORMADO: ${P_MALFORMADO:-0.01}
+
+services:
+  kafka:  # un solo broker en modo KRaft (sin ZooKeeper)
+    image: apache/kafka:3.8.0
+    ports: ["29092:29092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes: [kafka-data:/var/lib/kafka/data]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 15s
+
+  kafka-init:  # crea los 6 topics del catálogo con su retención
+    image: apache/kafka:3.8.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        C="/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists"
+        $$C --topic envios.estados          --partitions 3 --replication-factor 1 --config retention.ms=2592000000
+        $$C --topic envios.promesas         --partitions 3 --replication-factor 1 --config cleanup.policy=compact
+        $$C --topic envios.reprogramaciones --partitions 3 --replication-factor 1 --config retention.ms=2592000000
+        $$C --topic alertas.sla             --partitions 3 --replication-factor 1 --config retention.ms=604800000
+        $$C --topic notificaciones.enviadas --partitions 3 --replication-factor 1 --config retention.ms=604800000
+        $$C --topic envios.estados.dlq      --partitions 3 --replication-factor 1 --config retention.ms=2592000000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+
+  mongo:  # replica set de un solo nodo (necesario para change streams y transacciones)
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}).ok }"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+
+  simulador:
+    <<: *backend
+    command: ["node", "src/simulator/index.js"]
+    ports: ["4000:4000"]
+
+  proyector:
+    <<: *backend
+    command: ["node", "src/services/proyector.js"]
+  notificaciones:
+    <<: *backend
+    command: ["node", "src/services/notificaciones.js"]
+  reprogramacion:
+    <<: *backend
+    command: ["node", "src/services/reprogramacion.js"]
+  monitor-sla:
+    <<: *backend
+    command: ["node", "src/services/monitor-sla.js"]
+  analitica:
+    <<: *backend
+    command: ["node", "src/services/analitica.js"]
+
+  analitica-tiempo-hub:  # cuarto indicador: se activa en la demo con --profile replay
+    <<: *backend
+    profiles: ["replay"]
+    command: ["node", "src/services/analitica-tiempo-hub.js"]
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      mongo: { condition: service_healthy }
+    ports: ["3000:3000"]
+    environment:
+      MONGO_URL: mongodb://mongo:27017/rutasur?replicaSet=rs0
+      SIMULATOR_URL: http://simulador:4000
+
+volumes:
+  kafka-data:
+  mongo-data:
